@@ -1,0 +1,43 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Vendored runtimes and model trees
+third_party/
+
+# Built cabin screen
+ui/cms_ui
+*.o
+
+# Pipeline output: logs, stills, shots, incidents, journey database
+results/
+
+# Local junk
+*.log
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.ses
+.DS_Store
+*~
+*.swp
+*.mp4
+*.jpg
+*.png
+*.gif
+*.bmp
+*.tiff
+*.ico
+*.webp
+*.svg
+*.eps
+*.pdf
+*.doc
+*.docx

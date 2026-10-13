@@ -1,0 +1,3 @@
+# Enrolled fleet records. These are registration profiles, not live camera signals.
+driver|Sample Driver|DRV-1042|+1 555 0100|D-1042|C|2027-04-30|Sample Contact|+1 555 0199|CAB-18|06:00|Must wear glasses
+passenger|Sample Passenger|PAX-220|+1 555 0133|Rear|Sample Contact|+1 555 0177
