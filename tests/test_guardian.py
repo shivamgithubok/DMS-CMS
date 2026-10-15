@@ -9,7 +9,7 @@ import unittest
 import urllib.request
 
 import guardian
-import risk
+from pipeline import risk
 
 
 def _vlm(event: str, confidence: float) -> dict:
@@ -141,8 +141,8 @@ class PageTest(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        import guardian_page
-        import journey
+        from guardian import journey
+        from guardian import page as guardian_page
 
         tmp = tempfile.TemporaryDirectory()
         store = journey.JourneyStore(Path(tmp.name) / "journey.sqlite")

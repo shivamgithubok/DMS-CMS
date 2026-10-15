@@ -11,17 +11,18 @@ import json
 import sys
 from pathlib import Path
 
-import cabin_record
+from . import cabin_record
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 MODEL = ROOT / "third_party" / "Qwen3.5-0.8B"
 ENGINES = MODEL / "engines"
 
 PROMPT = (
-    "Cabin camera still. Reply with JSON only, no other text. "
-    '{"event":"none|phone|reaching|lying_down|altercation|unusual_object",'
-    '"confidence":0.0,"subjects":["driver|passenger|unknown"],'
-    '"description":"short","severity":"low|medium|high"}. '
+    "Cabin camera still. Reply with one JSON object and no other text. "
+    "Pick exactly one event. "
+    '{"event":"none","confidence":0.0,"subjects":["passenger"],'
+    '"description":"short","severity":"low"}. '
+    "event is one of none, phone, reaching, lying_down, altercation, unusual_object. "
     "phone means a person is holding or looking at a phone."
 )
 

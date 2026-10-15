@@ -98,5 +98,5 @@ class VlmClient:
 
 def open_qwen(root: Path, results: Path) -> VlmClient:
     python = root / "third_party" / "edgellm-venv" / "bin" / "python"
-    script = root / "pipeline" / "cabin_vlm.py"
+    script = root / "src" / "pipeline" / "cabin_vlm.py"
     return VlmClient([str(python), "-u", str(script), "--serve"], results / "vlm_worker.log")

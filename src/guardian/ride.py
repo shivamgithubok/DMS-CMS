@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import journey
+from . import journey
 
 CONFIRM_EVENTS = {"phone", "reaching", "lying_down", "altercation", "unusual_object"}
 MIN_CONFIDENCE = 0.60

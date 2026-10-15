@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import journey
+from guardian import journey
 
 
 class ColorTest(unittest.TestCase):

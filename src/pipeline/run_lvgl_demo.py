@@ -19,22 +19,25 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import time
 from collections import deque
 from pathlib import Path
 
-import cabin
-import cabin_record
-import check_pipeline as dms
-import cv2
-import guardian
-import journey
-import numpy as np
-import occupancy
-import risk
-import vlm_client
+SRC = Path(__file__).resolve().parents[1]
+ROOT = SRC.parent
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
-ROOT = Path(__file__).resolve().parents[1]
+import cv2
+import numpy as np
+
+import dms
+import guardian
+from cms import cabin, cabin_record, occupancy, vlm_client
+from guardian import journey
+from pipeline import risk
+
 RESULTS = ROOT / "results"
 PORT = 9750
 PREVIEW = (640, 360)
@@ -148,7 +151,7 @@ def open_dashboard() -> None:
         return
     env = os.environ.copy()
     env.setdefault("DISPLAY", ":1")
-    binary = ROOT / "ui" / "cms_ui"
+    binary = ROOT / "src" / "ui" / "cms_ui"
     print("[PIPE] opening dashboard")
     subprocess.Popen(
         [str(binary)],
@@ -187,6 +190,14 @@ def attach_view(fields: dict, preds: dict | None) -> dict:
     return fields
 
 
+def dms_shown() -> bool:
+    path = RESULTS / "dms_view.txt"
+    try:
+        return path.read_text().strip() == "1"
+    except OSError:
+        return False
+
+
 def write_preview(cabin_frame, driver_frame, face, fields: dict) -> None:
     view = cv2.resize(cabin_frame, PREVIEW)
     cv2.rectangle(view, (0, 0), (PREVIEW[0], 36), (16, 16, 16), -1)
@@ -212,33 +223,34 @@ def write_preview(cabin_frame, driver_frame, face, fields: dict) -> None:
         2,
         cv2.LINE_AA,
     )
-    px, py = 16, 48
-    pw, ph = PASSPORT
-    if face and face.get("bbox"):
-        x1, y1, x2, y2 = [int(v) for v in face["bbox"]]
-        crop = driver_frame[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
-        if crop.size == 0:
+    if dms_shown():
+        px, py = 72, 48
+        pw, ph = PASSPORT
+        if face and face.get("bbox"):
+            x1, y1, x2, y2 = [int(v) for v in face["bbox"]]
+            crop = driver_frame[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
+            if crop.size == 0:
+                crop = None
+        else:
             crop = None
-    else:
-        crop = None
-    if crop is None:
-        passport = np.zeros((ph, pw, 3), dtype=np.uint8)
-    else:
-        passport = cv2.resize(crop, PASSPORT)
-    view[py : py + ph, px : px + pw] = passport
-    border = (80, 80, 220) if fields["mode"] in {"incident", "sos", "warning"} else (80, 220, 80)
-    cv2.rectangle(view, (px - 2, py - 2), (px + pw + 2, py + ph + 2), border, 2)
-    cv2.putText(view, "DMS", (px, py + ph + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
-    lines = [
-        f"Eyes {fields.get('dms_eyes', '--')}",
-        f"Gaze {fields.get('dms_gaze', '--')}",
-        f"Yawn {fields.get('dms_yawn', '--')}",
-        fields.get("dms_focus", "--"),
-    ]
-    tx, ty = px + pw + 14, py + 28
-    for line in lines:
-        cv2.putText(view, line, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
-        ty += 30
+        if crop is None:
+            passport = np.zeros((ph, pw, 3), dtype=np.uint8)
+        else:
+            passport = cv2.resize(crop, PASSPORT)
+        view[py : py + ph, px : px + pw] = passport
+        border = (80, 80, 220) if fields["mode"] in {"incident", "sos", "warning"} else (80, 220, 80)
+        cv2.rectangle(view, (px - 2, py - 2), (px + pw + 2, py + ph + 2), border, 2)
+        cv2.putText(view, "DMS", (px, py + ph + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+        lines = [
+            f"Eyes {fields.get('dms_eyes', '--')}",
+            f"Gaze {fields.get('dms_gaze', '--')}",
+            f"Yawn {fields.get('dms_yawn', '--')}",
+            fields.get("dms_focus", "--"),
+        ]
+        tx, ty = px + pw + 14, py + 28
+        for line in lines:
+            cv2.putText(view, line, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            ty += 30
     payload = np.ascontiguousarray(view).tobytes()
     temporary = RESULTS / "live.bgr.tmp"
     target = RESULTS / "live.bgr"
@@ -584,10 +596,15 @@ class CabinDemo:
             reasons = list(self.open_reasons)
         sos = self.latched_mode == "sos"
         assessment = risk.assess(reasons, answer, sos)
-        if assessment["action"] == "incident" or self.incident_dir is not None:
+        front = getattr(self, "last_front", 0)
+        rear = getattr(self, "last_rear", 0)
+        clip = assessment["action"] == "incident" or self.incident_dir is not None
+        if clip:
             self.commit_incident(reasons, assessment, record_kind(assessment))
-            self.offer_guardian(sos, assessment, getattr(self, "last_front", 0), getattr(self, "last_rear", 0))
+            self.offer_guardian(sos, assessment, front, rear)
             self.commit_incident(reasons, assessment, record_kind(assessment))
+        elif str(answer.get("event") or "") in cabin.CLOSED_EVENTS:
+            self.offer_guardian(sos, assessment, front, rear)
         promote = assessment["action"] in {"warning", "incident"} or sos
         if promote:
             self.latch_assessment(assessment, sos, reasons)

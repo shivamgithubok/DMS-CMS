@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import json
 
-from cabin import CLOSED_EVENTS
+from .cabin import CLOSED_EVENTS
 
 SEVERITIES = {"low", "medium", "high"}
 SUBJECTS = {"driver", "passenger", "unknown"}
 
 
 def parse_record(text: str) -> dict:
-    payload = _json_object(text)
+    payload = _best_object(text)
     event = str(payload.get("event") or "").strip().lower().replace(" ", "_")
     if event not in CLOSED_EVENTS:
         return _empty(text)
@@ -59,13 +59,48 @@ def _empty(text: str) -> dict:
     }
 
 
-def _json_object(text: str) -> dict:
-    start = text.find("{")
+def _best_object(text: str) -> dict:
+    """One cabin object. A list of guesses keeps the strongest closed event."""
+    payload = _json_value(text)
+    if isinstance(payload, dict):
+        return payload
+    if not isinstance(payload, list):
+        return {}
+    best: dict | None = None
+    best_confidence = -1.0
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        event = str(item.get("event") or "").strip().lower().replace(" ", "_")
+        if event not in CLOSED_EVENTS or event == "none":
+            continue
+        confidence = _confidence(item.get("confidence"))
+        score = confidence if confidence is not None else -1.0
+        if best is None or score > best_confidence:
+            best = item
+            best_confidence = score
+    return best or {}
+
+
+def _json_value(text: str):
+    array_at = text.find("[")
+    object_at = text.find("{")
+    if array_at >= 0 and (object_at < 0 or array_at < object_at):
+        end = text.rfind("]")
+        if end > array_at:
+            try:
+                payload = json.loads(text[array_at:end + 1])
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, list):
+                return payload
+    if object_at < 0:
+        return {}
     end = text.rfind("}")
-    if start < 0 or end <= start:
+    if end <= object_at:
         return {}
     try:
-        payload = json.loads(text[start:end + 1])
+        payload = json.loads(text[object_at:end + 1])
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}

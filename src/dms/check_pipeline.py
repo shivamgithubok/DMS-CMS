@@ -23,7 +23,7 @@ from mediapipe.tasks.python.vision.core.vision_task_running_mode import (
     VisionTaskRunningMode,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 ONNX_PATH = ROOT / "models" / "edge_driver_model_distilled.onnx"
 ENGINE_PATH = ROOT / "models" / "edge_driver_model_distilled_fp16.engine"
 MODEL_PATH = ENGINE_PATH
@@ -108,7 +108,7 @@ def softmax(logits: np.ndarray) -> np.ndarray:
 
 def load_session(model_path: Path):
     if Path(model_path).suffix == ".engine":
-        from trt_session import EngineSession
+        from .trt_session import EngineSession
 
         session = EngineSession(model_path)
         if session.output_names != OUTPUT_ORDER:

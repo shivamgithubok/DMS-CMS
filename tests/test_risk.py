@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-import risk
+from pipeline import risk
 
 
 def _vlm(event: str, confidence: float, severity: str = "high") -> dict:
@@ -94,7 +94,7 @@ class AssessTest(unittest.TestCase):
 
 class SaveOnceTest(unittest.TestCase):
     def test_second_answer_rewrites_the_same_episode(self) -> None:
-        import run_lvgl_demo as demo
+        from pipeline import run_lvgl_demo as demo
 
         with tempfile.TemporaryDirectory() as tmp:
             demo.RESULTS = Path(tmp)
@@ -121,6 +121,35 @@ class SaveOnceTest(unittest.TestCase):
             self.assertEqual(payload["vlm"]["confidence"], 0.91)
             self.assertEqual(payload["parts"], ["vlm:altercation:5"])
             self.assertNotIn("planned_not_loaded", json.dumps(payload))
+
+
+class GuardianDiagnosisTest(unittest.TestCase):
+    def test_warning_look_is_published_on_the_ride(self) -> None:
+        import guardian
+        from pipeline import run_lvgl_demo as demo
+
+        app = demo.CabinDemo.__new__(demo.CabinDemo)
+        app.vlm_waiting = True
+        app.vlm_client = type("Look", (), {"poll": staticmethod(lambda: _vlm("phone", 0.99))})()
+        app.gate_log = [{"dms_reasons": ["yawn:Yawning@0.84"], "sent_at": 0.0}]
+        app.open_reasons = ["yawn:Yawning@0.84"]
+        app.latched_mode = "monitoring"
+        app.latch = 0
+        app.incident_dir = None
+        app.last_front = 0
+        app.last_rear = 1
+        app.guardian = guardian.TripPublisher(guardian.MemoryBus(), interval_s=30)
+        app.guardian.begin(0, 1)
+        try:
+            app._take_vlm_answer(10)
+            state = app.guardian._state
+            self.assertEqual(state["mode"], "ride")
+            self.assertEqual(state["vlm_record"]["event"], "phone")
+            self.assertEqual(state["vlm_record"]["confidence"], 0.99)
+            self.assertEqual(state["phone"], "Yes")
+            self.assertIsNone(app.incident_dir)
+        finally:
+            app.guardian.stop()
 
 
 if __name__ == "__main__":

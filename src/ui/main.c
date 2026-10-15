@@ -33,6 +33,9 @@ static lv_obj_t *cms_line[5];
 static lv_obj_t *sos_btn;
 static lv_obj_t *dismiss_btn;
 static lv_obj_t *live_view;
+static lv_obj_t *eye_btn;
+static lv_obj_t *eye_label;
+static int dms_shown;
 static uint8_t live_buf[PREVIEW_W * PREVIEW_H * 4] __attribute__((aligned(64)));
 static struct timespec live_mtim;
 static char mode[32] = "self_test";
@@ -103,6 +106,29 @@ static void on_dismiss(lv_event_t *event)
 {
     LV_UNUSED(event);
     write_cmd("dismiss");
+}
+
+static void write_dms_view(int shown)
+{
+    FILE *file = fopen("results/dms_view.txt.tmp", "w");
+    if(!file) return;
+    fprintf(file, "%d\n", shown ? 1 : 0);
+    fclose(file);
+    rename("results/dms_view.txt.tmp", "results/dms_view.txt");
+}
+
+static void paint_eye(void)
+{
+    lv_label_set_text(eye_label, dms_shown ? LV_SYMBOL_EYE_OPEN : LV_SYMBOL_EYE_CLOSE);
+    lv_obj_set_style_bg_color(eye_btn, lv_color_hex(dms_shown ? 0x1B7F4E : 0x12181F), 0);
+}
+
+static void on_eye(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    dms_shown = !dms_shown;
+    write_dms_view(dms_shown);
+    paint_eye();
 }
 
 static lv_color_t chip_color(const char *value)
@@ -567,6 +593,22 @@ static void build_screen(void)
     lv_obj_set_style_border_color(live_view, lv_color_hex(0x3A4450), 0);
     lv_obj_set_style_border_width(live_view, 2, 0);
 
+    /* Sits on the driver inset. The face stays off until this is clicked. */
+    eye_btn = lv_button_create(screen_root);
+    lv_obj_set_size(eye_btn, 48, 48);
+    lv_obj_set_pos(eye_btn, 40, 112);
+    lv_obj_set_style_radius(eye_btn, 24, 0);
+    lv_obj_set_style_border_width(eye_btn, 0, 0);
+    lv_obj_set_style_shadow_width(eye_btn, 0, 0);
+    lv_obj_add_event_cb(eye_btn, on_eye, LV_EVENT_CLICKED, NULL);
+    eye_label = lv_label_create(eye_btn);
+    lv_obj_set_style_text_color(eye_label, lv_color_hex(0xF4F7FB), 0);
+    lv_obj_set_style_text_font(eye_label, &lv_font_montserrat_20, 0);
+    lv_obj_center(eye_label);
+    dms_shown = 0;
+    write_dms_view(0);
+    paint_eye();
+
     chip[0] = make_chip(0, 0, 0, "CAM  --");
     chip[1] = make_chip(1, 1, 0, "MIC  --");
     chip[2] = make_chip(2, 0, 1, "GPS  --");
@@ -617,6 +659,7 @@ static void build_screen(void)
     sos_btn = make_button("SOS", 688, lv_color_hex(0xC62828), on_sos);
     dismiss_btn = make_button("Dismiss", 936, lv_color_hex(0x31404F), on_dismiss);
     build_profiles();
+    lv_obj_move_foreground(eye_btn);
 }
 
 int main(void)

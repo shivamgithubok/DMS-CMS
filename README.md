@@ -14,12 +14,12 @@ chmod +x setup.sh
 source .venv/bin/activate
 ```
 
-`setup.sh` creates `.venv`, installs [requirements.txt](requirements.txt), and builds `ui/cms_ui` when the compiler and LVGL tree are present.
+`setup.sh` creates `.venv`, installs [requirements.txt](requirements.txt), installs this project from `src/`, and builds `src/ui/cms_ui` when the compiler and LVGL tree are present.
 
 Rebuild the screen on its own:
 
 ```bash
-make -C ui
+make -C src/ui
 ```
 
 ## Run
@@ -27,65 +27,70 @@ make -C ui
 Start the cabin screen and the pipeline together. Demo videos loop. The screen listens on `127.0.0.1:9750`.
 
 ```bash
-python pipeline/run_lvgl_demo.py
+python src/pipeline/run_lvgl_demo.py
 ```
 
 Use the bundled clips explicitly:
 
 ```bash
-python pipeline/run_lvgl_demo.py videos/cabin_passenger.mp4 --driver videos/driver_face.mp4
+python src/pipeline/run_lvgl_demo.py videos/cabin_passenger.mp4 --driver videos/driver_face.mp4
 ```
 
 Live camera (V4L2 index):
 
 ```bash
-python pipeline/run_lvgl_demo.py --camera 0
+python src/pipeline/run_lvgl_demo.py --camera 0
 ```
 
 Ask the local Qwen3.5-0.8B engine when the cabin gate opens. That process uses `third_party/edgellm-venv`, not the dashboard virtualenv.
 
 ```bash
-python pipeline/run_lvgl_demo.py --vlm
+python src/pipeline/run_lvgl_demo.py --vlm
 ```
 
 Check the driver model and the cabin gate without loading the vision-language model. The report is written to `results/pipeline_report.json`.
 
 ```bash
-python pipeline/check_pipeline.py videos/driver_face.mp4 videos/driver_face_1.mp4
+python src/pipeline/check_pipeline.py videos/driver_face.mp4 videos/driver_face_1.mp4
 ```
 
 One cabin still through the Edge-LLM interpreter:
 
 ```bash
-third_party/edgellm-venv/bin/python pipeline/cabin_vlm.py path/to/still.jpg
+third_party/edgellm-venv/bin/python src/pipeline/cabin_vlm.py path/to/still.jpg
 ```
 
 Guardian phone page. Leave this running, then start the cabin demo. When a ride sends SOS, the link prints as `http://127.0.0.1:8080/t/<token>`. MQTT is `127.0.0.1:1883`.
 
 ```bash
-python pipeline/guardian_page.py
+python src/pipeline/guardian_page.py
 ```
 
 ## Tests
 
-These checks do not open a camera or load model weights. Run them from `pipeline` so the local imports resolve.
+These checks do not open a camera or load model weights. Run them from the project root.
 
 ```bash
-cd pipeline
-../.venv/bin/python -m unittest test_risk.py test_journey.py test_guardian.py
+python -m unittest tests.test_risk tests.test_journey tests.test_guardian
 ```
 
 ## Layout
 
+Code lives under `src/`. Models, videos, and generated output stay at the project root. `src/pipeline/` is the only place you start the system, and `run_lvgl_demo.py` calls the other packages on each frame.
+
 | Path | Role |
 | --- | --- |
-| `pipeline/run_lvgl_demo.py` | Main loop: cameras, risk, screen, optional VLM, guardian publish |
-| `pipeline/check_pipeline.py` | Driver-model pass and VLM-gate count |
-| `pipeline/guardian_page.py` | Local MQTT broker and phone page |
-| `pipeline/cabin_vlm.py` | One still through Qwen3.5-0.8B |
-| `ui/` | LVGL cabin screen (`make` produces `ui/cms_ui`) |
+| `src/pipeline/run_lvgl_demo.py` | Main loop: cameras, risk, screen, optional VLM, guardian publish |
+| `src/pipeline/check_pipeline.py` | Starts the driver-model pass |
+| `src/pipeline/guardian_page.py` | Starts the phone page |
+| `src/pipeline/cabin_vlm.py` | Starts one Qwen still, using the Edge-LLM interpreter |
+| `src/pipeline/risk.py` | Score that joins the driver hold and the cabin event |
+| `src/dms/` | Driver face model, TensorRT session, trigger rules |
+| `src/cms/` | Cabin gate, seat count, cabin record, Qwen client |
+| `src/guardian/` | Ride, phone page, journey database |
+| `src/ui/` | LVGL cabin screen (`make` produces `src/ui/cms_ui`) |
+| `tests/` | Risk, journey, and guardian checks |
 | `models/` | Driver ONNX, TensorRT engine, and BlazeFace weights |
 | `videos/` | Demo clips |
 | `fleet/roster.txt` | Sample driver and passenger records |
 | `results/` | Logs, journey database, incident clips |
-# DMS-CMS
