@@ -4,3 +4,4 @@ mediapipe>=0.10
 numpy>=1.26
 paho-mqtt>=2.1
 amqtt>=0.11
+aiortc>=1.15

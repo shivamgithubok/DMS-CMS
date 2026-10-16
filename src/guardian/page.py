@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import journey
+from .signaling import CabinSignal
 
 HOST = "127.0.0.1"
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
@@ -98,6 +99,9 @@ PAGE = """<!DOCTYPE html>
   #why { border: 0; border-radius: 999px; background: #243024; color: #f4f7fb; font-weight: 700; padding: 8px 14px; cursor: pointer; }
   #diagnosis h3 { margin: 12px 0 4px; font-size: 16px; }
   #why-description { display: block; text-align: right; max-width: 60%; }
+  #cabin-video { width: 100%; max-height: 280px; background: #000; border-radius: 10px; }
+  #view-cabin { border: 0; border-radius: 999px; background: #1f6b3a; color: #fff; font-weight: 700; padding: 8px 14px; cursor: pointer; }
+  #cabin-status { color: #c5d0c8; margin: 8px 0 0; }
 </style>
 </head>
 <body>
@@ -108,6 +112,14 @@ PAGE = """<!DOCTYPE html>
 <div class="banner ride" id="banner">Ride live</div>
 <div class="dummy">DUMMY DATA</div>
 <div id="map"></div>
+<section class="card" id="cabin-card">
+  <div class="passenger-head">
+    <h2>Cabin</h2>
+    <button id="view-cabin" type="button">View cabin</button>
+  </div>
+  <video id="cabin-video" autoplay playsinline muted></video>
+  <p id="cabin-status">Cabin video is off.</p>
+</section>
 <section class="card">
   <div class="passenger-head">
     <h2>Passenger</h2>
@@ -357,6 +369,65 @@ async function tick() {
   const points = await historyResponse.json();
   if (Array.isArray(points) && points.length) draw(points);
 }
+let cabinPc = null;
+let cabinWs = null;
+let cabinRemoteSet = false;
+let cabinIce = [];
+document.getElementById("view-cabin").addEventListener("click", function () {
+  const status = document.getElementById("cabin-status");
+  status.textContent = "Connecting...";
+  const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+  cabinWs = new WebSocket(wsProto + "//" + location.host + "/cabin-ws");
+  cabinWs.onopen = function () {
+    cabinWs.send(JSON.stringify({ type: "register", role: "viewer" }));
+  };
+  cabinWs.onmessage = async function (event) {
+    const msg = JSON.parse(event.data);
+    if (msg.type === "busy") {
+      status.textContent = "Another cabin view is already open.";
+      return;
+    }
+    if (msg.type === "server-status" && !msg.senderReady) {
+      status.textContent = "Camera sender is not connected.";
+    }
+    if (msg.type === "offer") {
+      status.textContent = "Negotiating...";
+      await handleCabinOffer(msg.sdp);
+    }
+    if (msg.type === "ice-candidate" && msg.candidate) {
+      if (!cabinPc || !cabinRemoteSet) cabinIce.push(msg.candidate);
+      else await cabinPc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+    }
+    if (msg.type === "peer-disconnected") {
+      status.textContent = "Camera disconnected.";
+    }
+  };
+  cabinWs.onerror = function () {
+    status.textContent = "Signaling error.";
+  };
+});
+async function handleCabinOffer(offerSdp) {
+  cabinPc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  cabinPc.ontrack = function (event) {
+    const video = document.getElementById("cabin-video");
+    video.srcObject = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+    video.play().catch(function () {});
+    document.getElementById("cabin-status").textContent = "Live cabin";
+  };
+  cabinPc.onicecandidate = function (event) {
+    if (event.candidate) {
+      cabinWs.send(JSON.stringify({ type: "ice-candidate", candidate: event.candidate }));
+    }
+  };
+  await cabinPc.setRemoteDescription(new RTCSessionDescription(offerSdp));
+  cabinRemoteSet = true;
+  while (cabinIce.length) {
+    await cabinPc.addIceCandidate(new RTCIceCandidate(cabinIce.shift()));
+  }
+  const answer = await cabinPc.createAnswer();
+  await cabinPc.setLocalDescription(answer);
+  cabinWs.send(JSON.stringify({ type: "answer", sdp: cabinPc.localDescription }));
+}
 setInterval(tick, 500);
 tick();
 </script>
@@ -423,6 +494,9 @@ class PageServer:
 
             def do_GET(self) -> None:
                 path = urlparse(self.path).path
+                if path == "/cabin-ws":
+                    owner.signal.serve(self)
+                    return
                 parts = [item for item in path.split("/") if item]
                 asset = static_file(parts)
                 if asset is not None:
@@ -479,6 +553,7 @@ class PageServer:
 
         self.view = view
         self.store = store or journey.JourneyStore()
+        self.signal = CabinSignal()
         self.http = ThreadingHTTPServer((HOST, http_port), Handler)
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()
