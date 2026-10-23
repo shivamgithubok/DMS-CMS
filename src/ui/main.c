@@ -20,23 +20,26 @@
 #define RAIL_W 100
 #define PREVIEW_W 640
 #define PREVIEW_H 360
+#define VIEW_W RAIL_X
+#define VIEW_H UI_H
 #define PORT 9750
 
 static lv_obj_t *screen_root;
 static lv_obj_t *title;
 static lv_obj_t *chip[4];
 static lv_obj_t *chip_text[4];
-static lv_obj_t *cms_card;
-static lv_obj_t *cms_title;
 static lv_obj_t *cms_pill;
-static lv_obj_t *cms_line[5];
+static lv_obj_t *cms_line[4];
+static lv_obj_t *vlm_card;
+static lv_obj_t *dms_panel;
+static lv_obj_t *dms_line[3];
 static lv_obj_t *sos_btn;
 static lv_obj_t *dismiss_btn;
 static lv_obj_t *live_view;
 static lv_obj_t *eye_btn;
 static lv_obj_t *eye_label;
 static int dms_shown;
-static uint8_t live_buf[PREVIEW_W * PREVIEW_H * 4] __attribute__((aligned(64)));
+static uint8_t live_buf[VIEW_W * VIEW_H * 4] __attribute__((aligned(64)));
 static struct timespec live_mtim;
 static char mode[32] = "self_test";
 static int sock_fd = -1;
@@ -123,12 +126,19 @@ static void paint_eye(void)
     lv_obj_set_style_bg_color(eye_btn, lv_color_hex(dms_shown ? 0x1B7F4E : 0x12181F), 0);
 }
 
+static void show_dms_cards(int shown)
+{
+    if(shown) lv_obj_remove_flag(dms_panel, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(dms_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void on_eye(lv_event_t *event)
 {
     LV_UNUSED(event);
     dms_shown = !dms_shown;
     write_dms_view(dms_shown);
     paint_eye();
+    show_dms_cards(dms_shown);
 }
 
 static lv_color_t chip_color(const char *value)
@@ -142,7 +152,7 @@ static lv_color_t chip_color(const char *value)
 static void style_chip(lv_obj_t *obj, lv_color_t color)
 {
     lv_obj_set_style_bg_color(obj, color, 0);
-    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_70, 0);
     lv_obj_set_style_radius(obj, 8, 0);
     lv_obj_set_style_border_width(obj, 0, 0);
     lv_obj_set_style_pad_all(obj, 0, 0);
@@ -198,10 +208,10 @@ static void save_snapshot(const char *name)
 
 static void apply_state(char *line)
 {
-    char *fields[16];
+    char *fields[22];
     int count = 0;
     fields[0] = line;
-    for(char *cursor = line; *cursor && count < 15; cursor++) {
+    for(char *cursor = line; *cursor && count < 21; cursor++) {
         if(*cursor == '|') {
             *cursor = '\0';
             fields[++count] = cursor + 1;
@@ -223,12 +233,21 @@ static void apply_state(char *line)
     int watch = strncmp(fields[8], "gate:", 5) == 0 || strcmp(fields[8], "planned") == 0 || strcmp(fields[0], "incident") == 0 ||
                 strcmp(fields[0], "warning") == 0 || strcmp(fields[0], "sos") == 0;
     lv_label_set_text(cms_pill, watch ? "Watch" : "Idle");
-    lv_obj_set_style_bg_color(cms_pill, lv_color_hex(watch ? 0x8A5A12 : 0x1B7F4E), 0);
+    lv_obj_set_style_bg_color(lv_obj_get_parent(cms_pill), lv_color_hex(watch ? 0x8A5A12 : 0x1B7F4E), 0);
     lv_label_set_text_fmt(cms_line[0], "Front seats  %s", fields[12]);
     lv_label_set_text_fmt(cms_line[1], "Rear seats  %s", fields[13]);
     lv_label_set_text_fmt(cms_line[2], "Phone  %s", fields[14]);
     lv_label_set_text_fmt(cms_line[3], "Reaching  %s", fields[15]);
-    lv_label_set_text_fmt(cms_line[4], "VLM  %s", fields[8]);
+    if(count >= 19 && fields[19][0] != '\0') {
+        lv_label_set_text_fmt(vlm_card, "VLM  %s\n%s", fields[8], fields[19]);
+    } else {
+        lv_label_set_text_fmt(vlm_card, "VLM  %s", fields[8]);
+    }
+    if(count >= 18) {
+        lv_label_set_text_fmt(dms_line[0], "Eyes  %s", fields[16]);
+        lv_label_set_text_fmt(dms_line[1], "Gaze  %s", fields[17]);
+        lv_label_set_text_fmt(dms_line[2], "Yawn  %s", fields[18]);
+    }
 
     if(changed) save_snapshot(mode);
     if((strcmp(mode, "incident") == 0 || strcmp(mode, "warning") == 0) && incident_seen_at == 0) {
@@ -313,28 +332,38 @@ static void poll_live(void)
         return;
     }
 
-    for(int i = 0; i < PREVIEW_W * PREVIEW_H; i++) {
-        live_buf[i * 4 + 0] = bgr[i * 3 + 0];
-        live_buf[i * 4 + 1] = bgr[i * 3 + 1];
-        live_buf[i * 4 + 2] = bgr[i * 3 + 2];
-        live_buf[i * 4 + 3] = 0xFF;
+    /* Scale here. Stretching inside LVGL pegs the CPU and the window stops closing. */
+    for(int y = 0; y < VIEW_H; y++) {
+        int sy = y * PREVIEW_H / VIEW_H;
+        const uint8_t *src = bgr + (size_t)sy * PREVIEW_W * 3;
+        uint8_t *dst = live_buf + (size_t)y * VIEW_W * 4;
+        for(int x = 0; x < VIEW_W; x++) {
+            int sx = x * PREVIEW_W / VIEW_W;
+            const uint8_t *px = src + (size_t)sx * 3;
+            dst[0] = px[0];
+            dst[1] = px[1];
+            dst[2] = px[2];
+            dst[3] = 0xFF;
+            dst += 4;
+        }
     }
     free(bgr);
     live_mtim = st.st_mtim;
     lv_obj_invalidate(live_view);
 }
 
-static lv_obj_t *make_chip(int index, int col, int row, const char *text)
+static lv_obj_t *make_chip(int index, int x, const char *text)
 {
     lv_obj_t *obj = lv_obj_create(screen_root);
-    lv_obj_set_size(obj, 210, 48);
-    lv_obj_set_pos(obj, 688 + col * 230, 72 + row * 60);
+    lv_obj_set_size(obj, 108, 28);
+    lv_obj_set_pos(obj, x, UI_H - 40);
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     style_chip(obj, lv_color_hex(0x3A4450));
+    lv_obj_set_style_bg_opa(obj, LV_OPA_70, 0);
     lv_obj_t *label = lv_label_create(obj);
     lv_label_set_text(label, text);
     lv_obj_set_style_text_color(label, lv_color_hex(0xF4F7FB), 0);
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
     lv_obj_center(label);
     chip_text[index] = label;
     return obj;
@@ -343,8 +372,8 @@ static lv_obj_t *make_chip(int index, int col, int row, const char *text)
 static lv_obj_t *make_button(const char *text, int x, lv_color_t color, lv_event_cb_t cb)
 {
     lv_obj_t *btn = lv_button_create(screen_root);
-    lv_obj_set_size(btn, 220, 64);
-    lv_obj_set_pos(btn, x, 548);
+    lv_obj_set_size(btn, 104, 40);
+    lv_obj_set_pos(btn, x, UI_H - 52);
     lv_obj_set_style_bg_color(btn, color, 0);
     lv_obj_set_style_radius(btn, 10, 0);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
@@ -499,6 +528,46 @@ static lv_obj_t *make_rail_button(int index, int y, const char *text)
     return btn;
 }
 
+static lv_obj_t *make_event_card(int index, const char *text)
+{
+    lv_obj_t *row = lv_obj_create(screen_root);
+    lv_obj_set_pos(row, RAIL_X - 188, 12 + index * 34);
+    lv_obj_set_size(row, 176, 30);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_60, 0);
+    lv_obj_set_style_radius(row, 6, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_t *label = lv_label_create(row);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xF4F7FB), 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(label, 8, 7);
+    return label;
+}
+
+static lv_obj_t *make_vlm_card(void)
+{
+    lv_obj_t *row = lv_obj_create(screen_root);
+    lv_obj_set_pos(row, RAIL_X - 188, 12 + 5 * 34);
+    lv_obj_set_size(row, 176, 96);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_70, 0);
+    lv_obj_set_style_radius(row, 6, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_t *label = lv_label_create(row);
+    lv_label_set_text(label, "VLM  idle");
+    lv_obj_set_width(label, 160);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xF4F7FB), 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(label, 8, 8);
+    return label;
+}
+
 static void build_profiles(void)
 {
     load_roster();
@@ -581,84 +650,85 @@ static void build_screen(void)
     lv_obj_remove_flag(screen_root, LV_OBJ_FLAG_SCROLLABLE);
 
     title = lv_label_create(screen_root);
-    lv_label_set_text(title, "CABIN MONITOR");
+    lv_label_set_text(title, "CABIN");
     lv_obj_set_style_text_color(title, lv_color_hex(0xF4F7FB), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
-    lv_obj_set_pos(title, 24, 16);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(title, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(title, LV_OPA_60, 0);
+    lv_obj_set_style_radius(title, 6, 0);
+    lv_obj_set_style_pad_hor(title, 8, 0);
+    lv_obj_set_style_pad_ver(title, 4, 0);
+    lv_obj_set_pos(title, 540, 12);
 
     memset(live_buf, 0x20, sizeof(live_buf));
     live_view = lv_canvas_create(screen_root);
-    lv_canvas_set_buffer(live_view, live_buf, PREVIEW_W, PREVIEW_H, LV_COLOR_FORMAT_XRGB8888);
-    lv_obj_set_pos(live_view, 24, 64);
-    lv_obj_set_style_border_color(live_view, lv_color_hex(0x3A4450), 0);
-    lv_obj_set_style_border_width(live_view, 2, 0);
+    lv_canvas_set_buffer(live_view, live_buf, VIEW_W, VIEW_H, LV_COLOR_FORMAT_XRGB8888);
+    lv_obj_set_pos(live_view, 0, 0);
+    lv_obj_set_style_border_width(live_view, 0, 0);
+    lv_obj_remove_flag(live_view, LV_OBJ_FLAG_CLICKABLE);
 
-    /* Sits on the driver inset. The face stays off until this is clicked. */
+    /* Just above the small driver inset, on the left. Face stays off until clicked. */
     eye_btn = lv_button_create(screen_root);
-    lv_obj_set_size(eye_btn, 48, 48);
-    lv_obj_set_pos(eye_btn, 40, 112);
-    lv_obj_set_style_radius(eye_btn, 24, 0);
+    lv_obj_set_size(eye_btn, 36, 36);
+    lv_obj_set_pos(eye_btn, 12, 8);
+    lv_obj_set_style_radius(eye_btn, 18, 0);
+    lv_obj_set_style_bg_opa(eye_btn, LV_OPA_70, 0);
     lv_obj_set_style_border_width(eye_btn, 0, 0);
     lv_obj_set_style_shadow_width(eye_btn, 0, 0);
     lv_obj_add_event_cb(eye_btn, on_eye, LV_EVENT_CLICKED, NULL);
     eye_label = lv_label_create(eye_btn);
     lv_obj_set_style_text_color(eye_label, lv_color_hex(0xF4F7FB), 0);
-    lv_obj_set_style_text_font(eye_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(eye_label, &lv_font_montserrat_14, 0);
     lv_obj_center(eye_label);
     dms_shown = 0;
     write_dms_view(0);
     paint_eye();
 
-    chip[0] = make_chip(0, 0, 0, "CAM  --");
-    chip[1] = make_chip(1, 1, 0, "MIC  --");
-    chip[2] = make_chip(2, 0, 1, "GPS  --");
-    chip[3] = make_chip(3, 1, 1, "DMS  --");
+    dms_panel = lv_obj_create(screen_root);
+    lv_obj_set_pos(dms_panel, 12, 180);
+    lv_obj_set_size(dms_panel, 150, 86);
+    lv_obj_remove_flag(dms_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(dms_panel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(dms_panel, 0, 0);
+    lv_obj_set_style_pad_all(dms_panel, 0, 0);
+    const char *dms_ready[3] = {"Eyes  --", "Gaze  --", "Yawn  --"};
+    for(int i = 0; i < 3; i++) {
+        lv_obj_t *row = lv_obj_create(dms_panel);
+        lv_obj_set_pos(row, 0, i * 30);
+        lv_obj_set_size(row, 150, 26);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x101820), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_60, 0);
+        lv_obj_set_style_radius(row, 6, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        dms_line[i] = lv_label_create(row);
+        lv_label_set_text(dms_line[i], dms_ready[i]);
+        lv_obj_set_style_text_color(dms_line[i], lv_color_hex(0xF4F7FB), 0);
+        lv_obj_set_style_text_font(dms_line[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_pos(dms_line[i], 8, 5);
+    }
+    show_dms_cards(0);
 
-    cms_card = lv_obj_create(screen_root);
-    lv_obj_set_pos(cms_card, 688, 200);
-    lv_obj_set_size(cms_card, 460, 320);
-    lv_obj_remove_flag(cms_card, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(cms_card, lv_color_hex(0x243044), 0);
-    lv_obj_set_style_bg_opa(cms_card, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(cms_card, 0, 0);
-    lv_obj_set_style_radius(cms_card, 12, 0);
-    lv_obj_set_style_pad_all(cms_card, 16, 0);
+    chip[0] = make_chip(0, 12, "CAM  --");
+    chip[1] = make_chip(1, 128, "MIC  --");
+    chip[2] = make_chip(2, 244, "GPS  --");
+    chip[3] = make_chip(3, 360, "DMS  --");
 
-    cms_title = lv_label_create(cms_card);
-    lv_label_set_text(cms_title, "CMS  CABIN");
-    lv_obj_set_style_text_color(cms_title, lv_color_hex(0xF4F7FB), 0);
-    lv_obj_set_style_text_font(cms_title, &lv_font_montserrat_28, 0);
-    lv_obj_set_pos(cms_title, 8, 8);
-
-    cms_pill = lv_label_create(cms_card);
-    lv_label_set_text(cms_pill, "Idle");
-    lv_obj_set_style_text_color(cms_pill, lv_color_hex(0xF4F7FB), 0);
-    lv_obj_set_style_text_font(cms_pill, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_bg_color(cms_pill, lv_color_hex(0x1B7F4E), 0);
-    lv_obj_set_style_bg_opa(cms_pill, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(cms_pill, 8, 0);
-    lv_obj_set_style_pad_hor(cms_pill, 12, 0);
-    lv_obj_set_style_pad_ver(cms_pill, 6, 0);
-    lv_obj_align(cms_pill, LV_ALIGN_TOP_RIGHT, -8, 8);
-
-    const char *cms_ready[5] = {
+    cms_pill = make_event_card(0, "Idle");
+    const char *cms_ready[4] = {
         "Front seats  --",
         "Rear seats  --",
         "Phone  --",
         "Reaching  --",
-        "VLM  idle",
     };
-    for(int i = 0; i < 5; i++) {
-        cms_line[i] = lv_label_create(cms_card);
-        lv_label_set_text(cms_line[i], cms_ready[i]);
-        lv_obj_set_style_text_color(cms_line[i], lv_color_hex(0xF4F7FB), 0);
-        lv_obj_set_style_text_font(cms_line[i], &lv_font_montserrat_20, 0);
-        lv_obj_set_pos(cms_line[i], 8, 64 + i * 42);
-    }
+    for(int i = 0; i < 4; i++) cms_line[i] = make_event_card(i + 1, cms_ready[i]);
+    vlm_card = make_vlm_card();
 
-    sos_btn = make_button("SOS", 688, lv_color_hex(0xC62828), on_sos);
-    dismiss_btn = make_button("Dismiss", 936, lv_color_hex(0x31404F), on_dismiss);
+    sos_btn = make_button("SOS", RAIL_X - 116, lv_color_hex(0xC62828), on_sos);
+    dismiss_btn = make_button("Dismiss", RAIL_X - 228, lv_color_hex(0x31404F), on_dismiss);
     build_profiles();
+    lv_obj_move_foreground(title);
     lv_obj_move_foreground(eye_btn);
 }
 

@@ -170,7 +170,10 @@ def pop_command() -> str:
     return text
 
 
-PASSPORT = (96, 132)
+# Small face inset. Screen pixels assume the 640x360 preview is stretched
+# across the LVGL view (1180x640). The eye button sits just above this box.
+PASSPORT = (54, 65)
+DMS_ORIGIN = (7, 32)
 
 
 def _short_gaze(label: str) -> str:
@@ -200,31 +203,20 @@ def dms_shown() -> bool:
 
 def write_preview(cabin_frame, driver_frame, face, fields: dict) -> None:
     view = cv2.resize(cabin_frame, PREVIEW)
-    cv2.rectangle(view, (0, 0), (PREVIEW[0], 36), (16, 16, 16), -1)
-    cv2.putText(
-        view,
-        "CMS  cabin",
-        (12, 26),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (255, 255, 255),
-        2,
-        cv2.LINE_AA,
-    )
     fps_label = f"{fields['fps']:.1f} FPS"
-    fps_size = cv2.getTextSize(fps_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+    fps_size = cv2.getTextSize(fps_label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
     cv2.putText(
         view,
         fps_label,
-        (PREVIEW[0] - fps_size[0] - 12, 26),
+        ((PREVIEW[0] - fps_size[0]) // 2, PREVIEW[1] - 14),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (80, 220, 255),
-        2,
+        0.45,
+        (255, 255, 255),
+        1,
         cv2.LINE_AA,
     )
     if dms_shown():
-        px, py = 72, 48
+        px, py = DMS_ORIGIN
         pw, ph = PASSPORT
         if face and face.get("bbox"):
             x1, y1, x2, y2 = [int(v) for v in face["bbox"]]
@@ -239,18 +231,7 @@ def write_preview(cabin_frame, driver_frame, face, fields: dict) -> None:
             passport = cv2.resize(crop, PASSPORT)
         view[py : py + ph, px : px + pw] = passport
         border = (80, 80, 220) if fields["mode"] in {"incident", "sos", "warning"} else (80, 220, 80)
-        cv2.rectangle(view, (px - 2, py - 2), (px + pw + 2, py + ph + 2), border, 2)
-        cv2.putText(view, "DMS", (px, py + ph + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
-        lines = [
-            f"Eyes {fields.get('dms_eyes', '--')}",
-            f"Gaze {fields.get('dms_gaze', '--')}",
-            f"Yawn {fields.get('dms_yawn', '--')}",
-            fields.get("dms_focus", "--"),
-        ]
-        tx, ty = px + pw + 14, py + 28
-        for line in lines:
-            cv2.putText(view, line, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
-            ty += 30
+        cv2.rectangle(view, (px - 1, py - 1), (px + pw + 1, py + ph + 1), border, 1)
     payload = np.ascontiguousarray(view).tobytes()
     temporary = RESULTS / "live.bgr.tmp"
     target = RESULTS / "live.bgr"
@@ -276,6 +257,10 @@ def state_line(fields: dict) -> str:
         fields["cms_rear"],
         fields["cms_phone"],
         fields["cms_reach"],
+        fields.get("dms_eyes", "--"),
+        fields.get("dms_gaze", "--"),
+        fields.get("dms_yawn", "--"),
+        fields.get("vlm_text", ""),
     ]
     return "|".join(ordered)
 
@@ -434,7 +419,15 @@ class CabinDemo:
             "cms_rear": str(rear),
             "cms_phone": "--",
             "cms_reach": "--",
+            "vlm_text": self._vlm_text(),
         }
+
+    def _vlm_text(self) -> str:
+        record = self.vlm_result if isinstance(self.vlm_result, dict) else None
+        if not record:
+            return ""
+        text = " ".join(str(record.get("description") or "").split()).replace("|", "/")
+        return text[:80]
 
     def step(self, driver_frame, cabin_frame, index: int, fps: float) -> dict:
         command = pop_command()
