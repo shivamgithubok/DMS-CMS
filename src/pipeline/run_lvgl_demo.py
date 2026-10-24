@@ -37,6 +37,7 @@ import guardian
 from cms import cabin, cabin_record, occupancy, vlm_client
 from guardian import journey
 from pipeline import risk
+from pipeline.present import Display, state_line
 
 RESULTS = ROOT / "results"
 PORT = 9750
@@ -170,8 +171,8 @@ def pop_command() -> str:
     return text
 
 
-# Small face inset. Screen pixels assume the 640x360 preview is stretched
-# across the LVGL view (1180x640). The eye button sits just above this box.
+# Optional face inset in the 640x360 cabin frame. The driver screen leaves
+# this off. It is drawn only when results/dms_view.txt is 1.
 PASSPORT = (54, 65)
 DMS_ORIGIN = (7, 32)
 
@@ -203,18 +204,6 @@ def dms_shown() -> bool:
 
 def write_preview(cabin_frame, driver_frame, face, fields: dict) -> None:
     view = cv2.resize(cabin_frame, PREVIEW)
-    fps_label = f"{fields['fps']:.1f} FPS"
-    fps_size = cv2.getTextSize(fps_label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
-    cv2.putText(
-        view,
-        fps_label,
-        ((PREVIEW[0] - fps_size[0]) // 2, PREVIEW[1] - 14),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.45,
-        (255, 255, 255),
-        1,
-        cv2.LINE_AA,
-    )
     if dms_shown():
         px, py = DMS_ORIGIN
         pw, ph = PASSPORT
@@ -239,32 +228,6 @@ def write_preview(cabin_frame, driver_frame, face, fields: dict) -> None:
     temporary.replace(target)
 
 
-def state_line(fields: dict) -> str:
-    ordered = [
-        fields["mode"],
-        fields["camera"],
-        fields["mic"],
-        fields["gps"],
-        fields["dms"],
-        str(fields["occupancy"]),
-        fields["severity"],
-        fields["alert"],
-        fields["vlm"],
-        fields["clip"],
-        fields["message"].replace("|", "/"),
-        f"{fields['fps']:.1f}",
-        fields["cms_front"],
-        fields["cms_rear"],
-        fields["cms_phone"],
-        fields["cms_reach"],
-        fields.get("dms_eyes", "--"),
-        fields.get("dms_gaze", "--"),
-        fields.get("dms_yawn", "--"),
-        fields.get("vlm_text", ""),
-    ]
-    return "|".join(ordered)
-
-
 class CabinDemo:
     def __init__(self, session, detector, vlm: vlm_client.VlmClient | None = None) -> None:
         self.session = session
@@ -275,6 +238,9 @@ class CabinDemo:
         self.cooldown = 0
         self.latch = 0
         self.latched_mode = "monitoring"
+        self.display = Display()
+        self.last_front = 0
+        self.last_rear = 0
         self.latched_message = ""
         self.latched_severity = "none"
         self.latched_alert = ""
@@ -307,7 +273,7 @@ class CabinDemo:
             saved = write_clip(folder / CLIP_NAME, frames, clip_rate(stamps))
             self.incident_dir = folder
             self.incident_video = CLIP_NAME if saved else None
-            self.clip = "saved" if saved else "no"
+            self.clip = "saved" if saved else "fail"
         payload = {
             "episode": self.episode,
             "kind": kind,
@@ -429,7 +395,16 @@ class CabinDemo:
         text = " ".join(str(record.get("description") or "").split()).replace("|", "/")
         return text[:80]
 
+    def _emit(self, fields: dict, preds: dict | None, face, started: float) -> dict:
+        """Attach the driver-facing words. The screen does not score risk."""
+        notice = getattr(self, "guardian", None)
+        link = notice.status if notice is not None else "idle"
+        latency = f"{int((time.perf_counter() - started) * 1000)}"
+        self.display.apply(fields, preds, face, link, latency, face_known=True)
+        return fields
+
     def step(self, driver_frame, cabin_frame, index: int, fps: float) -> dict:
+        started = time.perf_counter()
         command = pop_command()
         face_img, face = dms.crop_face(driver_frame, self.detector)
         outputs = self.session.run(None, {"image": dms.preprocess(face_img)})
@@ -512,7 +487,7 @@ class CabinDemo:
             cabin.apply_vlm(fields, self.vlm_result)
             write_preview(cabin_frame, driver_frame, face, fields)
             self.sync_guardian(front, rear, preds)
-            return fields
+            return self._emit(fields, preds, face, started)
 
         if reasons:
             self.hold += 1
@@ -566,7 +541,7 @@ class CabinDemo:
         cabin.apply_vlm(fields, self.vlm_result)
         write_preview(cabin_frame, driver_frame, face, fields)
         self.sync_guardian(front, rear, preds)
-        return fields
+        return self._emit(fields, preds, face, started)
 
     def note_step(self, seconds: float) -> None:
         if self.vlm_waiting:
@@ -640,6 +615,7 @@ def main() -> None:
     open_dashboard()
 
     boot = demo.fields("self_test", 0, 0, "none", "", "Camera ok    mic down    GPS no fix")
+    demo.display.apply(boot, None, None, "idle", "--", face_known=False)
     deadline = time.time() + 1.2
     while time.time() < deadline:
         server.send(state_line(boot))
@@ -690,6 +666,20 @@ def main() -> None:
                         break
                     print("[PIPE] video loop", flush=True)
                 misses += 1
+                if misses == 8:
+                    fault = demo.fields(
+                        "monitoring",
+                        demo.last_front,
+                        demo.last_rear,
+                        "none",
+                        "",
+                        "Camera disconnected",
+                    )
+                    fault["camera"] = "down"
+                    fault["fps"] = 0.0
+                    link = demo.guardian.status if demo.guardian else "idle"
+                    demo.display.apply(fault, None, None, link, "--", face_known=True)
+                    server.send(state_line(fault))
                 if misses > 50:
                     raise RuntimeError(f"Camera {args.camera} stopped sending frames")
                 time.sleep(0.05)
