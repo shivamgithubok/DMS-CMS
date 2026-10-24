@@ -37,6 +37,7 @@ import guardian
 from cms import cabin, cabin_record, occupancy, vlm_client
 from guardian import journey
 from pipeline import risk
+from pipeline.present import Display, state_line
 
 RESULTS = ROOT / "results"
 PORT = 9750
@@ -170,7 +171,10 @@ def pop_command() -> str:
     return text
 
 
-PASSPORT = (96, 132)
+# Optional face inset in the 640x360 cabin frame. The driver screen leaves
+# this off. It is drawn only when results/dms_view.txt is 1.
+PASSPORT = (54, 65)
+DMS_ORIGIN = (7, 32)
 
 
 def _short_gaze(label: str) -> str:
@@ -200,31 +204,8 @@ def dms_shown() -> bool:
 
 def write_preview(cabin_frame, driver_frame, face, fields: dict) -> None:
     view = cv2.resize(cabin_frame, PREVIEW)
-    cv2.rectangle(view, (0, 0), (PREVIEW[0], 36), (16, 16, 16), -1)
-    cv2.putText(
-        view,
-        "CMS  cabin",
-        (12, 26),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (255, 255, 255),
-        2,
-        cv2.LINE_AA,
-    )
-    fps_label = f"{fields['fps']:.1f} FPS"
-    fps_size = cv2.getTextSize(fps_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-    cv2.putText(
-        view,
-        fps_label,
-        (PREVIEW[0] - fps_size[0] - 12, 26),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (80, 220, 255),
-        2,
-        cv2.LINE_AA,
-    )
     if dms_shown():
-        px, py = 72, 48
+        px, py = DMS_ORIGIN
         pw, ph = PASSPORT
         if face and face.get("bbox"):
             x1, y1, x2, y2 = [int(v) for v in face["bbox"]]
@@ -239,45 +220,12 @@ def write_preview(cabin_frame, driver_frame, face, fields: dict) -> None:
             passport = cv2.resize(crop, PASSPORT)
         view[py : py + ph, px : px + pw] = passport
         border = (80, 80, 220) if fields["mode"] in {"incident", "sos", "warning"} else (80, 220, 80)
-        cv2.rectangle(view, (px - 2, py - 2), (px + pw + 2, py + ph + 2), border, 2)
-        cv2.putText(view, "DMS", (px, py + ph + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
-        lines = [
-            f"Eyes {fields.get('dms_eyes', '--')}",
-            f"Gaze {fields.get('dms_gaze', '--')}",
-            f"Yawn {fields.get('dms_yawn', '--')}",
-            fields.get("dms_focus", "--"),
-        ]
-        tx, ty = px + pw + 14, py + 28
-        for line in lines:
-            cv2.putText(view, line, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
-            ty += 30
+        cv2.rectangle(view, (px - 1, py - 1), (px + pw + 1, py + ph + 1), border, 1)
     payload = np.ascontiguousarray(view).tobytes()
     temporary = RESULTS / "live.bgr.tmp"
     target = RESULTS / "live.bgr"
     temporary.write_bytes(payload)
     temporary.replace(target)
-
-
-def state_line(fields: dict) -> str:
-    ordered = [
-        fields["mode"],
-        fields["camera"],
-        fields["mic"],
-        fields["gps"],
-        fields["dms"],
-        str(fields["occupancy"]),
-        fields["severity"],
-        fields["alert"],
-        fields["vlm"],
-        fields["clip"],
-        fields["message"].replace("|", "/"),
-        f"{fields['fps']:.1f}",
-        fields["cms_front"],
-        fields["cms_rear"],
-        fields["cms_phone"],
-        fields["cms_reach"],
-    ]
-    return "|".join(ordered)
 
 
 class CabinDemo:
@@ -290,6 +238,9 @@ class CabinDemo:
         self.cooldown = 0
         self.latch = 0
         self.latched_mode = "monitoring"
+        self.display = Display()
+        self.last_front = 0
+        self.last_rear = 0
         self.latched_message = ""
         self.latched_severity = "none"
         self.latched_alert = ""
@@ -322,7 +273,7 @@ class CabinDemo:
             saved = write_clip(folder / CLIP_NAME, frames, clip_rate(stamps))
             self.incident_dir = folder
             self.incident_video = CLIP_NAME if saved else None
-            self.clip = "saved" if saved else "no"
+            self.clip = "saved" if saved else "fail"
         payload = {
             "episode": self.episode,
             "kind": kind,
@@ -434,9 +385,26 @@ class CabinDemo:
             "cms_rear": str(rear),
             "cms_phone": "--",
             "cms_reach": "--",
+            "vlm_text": self._vlm_text(),
         }
 
+    def _vlm_text(self) -> str:
+        record = self.vlm_result if isinstance(self.vlm_result, dict) else None
+        if not record:
+            return ""
+        text = " ".join(str(record.get("description") or "").split()).replace("|", "/")
+        return text[:80]
+
+    def _emit(self, fields: dict, preds: dict | None, face, started: float) -> dict:
+        """Attach the driver-facing words. The screen does not score risk."""
+        notice = getattr(self, "guardian", None)
+        link = notice.status if notice is not None else "idle"
+        latency = f"{int((time.perf_counter() - started) * 1000)}"
+        self.display.apply(fields, preds, face, link, latency, face_known=True)
+        return fields
+
     def step(self, driver_frame, cabin_frame, index: int, fps: float) -> dict:
+        started = time.perf_counter()
         command = pop_command()
         face_img, face = dms.crop_face(driver_frame, self.detector)
         outputs = self.session.run(None, {"image": dms.preprocess(face_img)})
@@ -519,7 +487,7 @@ class CabinDemo:
             cabin.apply_vlm(fields, self.vlm_result)
             write_preview(cabin_frame, driver_frame, face, fields)
             self.sync_guardian(front, rear, preds)
-            return fields
+            return self._emit(fields, preds, face, started)
 
         if reasons:
             self.hold += 1
@@ -573,7 +541,7 @@ class CabinDemo:
         cabin.apply_vlm(fields, self.vlm_result)
         write_preview(cabin_frame, driver_frame, face, fields)
         self.sync_guardian(front, rear, preds)
-        return fields
+        return self._emit(fields, preds, face, started)
 
     def note_step(self, seconds: float) -> None:
         if self.vlm_waiting:
@@ -647,6 +615,7 @@ def main() -> None:
     open_dashboard()
 
     boot = demo.fields("self_test", 0, 0, "none", "", "Camera ok    mic down    GPS no fix")
+    demo.display.apply(boot, None, None, "idle", "--", face_known=False)
     deadline = time.time() + 1.2
     while time.time() < deadline:
         server.send(state_line(boot))
@@ -697,6 +666,20 @@ def main() -> None:
                         break
                     print("[PIPE] video loop", flush=True)
                 misses += 1
+                if misses == 8:
+                    fault = demo.fields(
+                        "monitoring",
+                        demo.last_front,
+                        demo.last_rear,
+                        "none",
+                        "",
+                        "Camera disconnected",
+                    )
+                    fault["camera"] = "down"
+                    fault["fps"] = 0.0
+                    link = demo.guardian.status if demo.guardian else "idle"
+                    demo.display.apply(fault, None, None, link, "--", face_known=True)
+                    server.send(state_line(fault))
                 if misses > 50:
                     raise RuntimeError(f"Camera {args.camera} stopped sending frames")
                 time.sleep(0.05)
